@@ -3,6 +3,7 @@ matplotlib
 numpy
 scipy
 tensorboardX
+tensorboard
 Unidecode
 pillow
 ax-platform
@@ -12,3 +13,6 @@ scikit-learn
 setuptools
 pydicom
 pillow
+nibabel
+tensorflow>=2.4
+scikit-optimize

@@ -286,9 +286,9 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--images_path", type=str, default="data\\canis_intensities.csv",
+    parser.add_argument("--images_path", type=str, default="AllTrainingImages/images",
                         help="Path to intensities csv file")
-    parser.add_argument("--labels_path", type=str, default="data\\canis_labels.csv",
+    parser.add_argument("--labels_path", type=str, default="AllTrainingImages/targets",
                         help="Path to labels csv file")
     parser.add_argument("--verbose", type=str, default=1)
     args = parser.parse_args()
