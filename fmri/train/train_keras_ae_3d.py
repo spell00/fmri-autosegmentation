@@ -215,7 +215,7 @@ class Train:
             verbose=self.verbose,
             epochs=10000,
             callbacks=callbacks,
-            #validation_data=(x_valid, y_valid)
+            validation_data=(x_valid, y_valid)
         )
         del model
         model = tf.keras.models.load_model(filepath, custom_objects={
