@@ -51,15 +51,17 @@ def get_fmri(path, binarize=False):
     all_paths = os.listdir(path)
     xs = []
     for p in all_paths:
+        tmp = []
         x = nib.load(f'{path}/{p}').dataobj
         x = np.array(x)
         x = resize_data(x, [256, 256, x.shape[-1]])
         # x = np.sum(x, -1)
         if binarize:
             x[x != 0] = 1
-        for im in range(x.shape[2]):
-            xs += [x[:, :, im]]
-    xs = np.stack(xs)
+        # for im in range(x.shape[2]):
+        #     tmp += [x[:, :, im]]
+        xs += [x]
+    # xs = np.stack(xs)
     return xs
 
 
@@ -132,139 +134,144 @@ class Train:
             f'{wd}',
         ])
 
-        for i, (train_indices, test_indices) in enumerate(skf.split(list(range(len(self.labels))), np.array([1 for _ in range(len(self.labels))]))):
-            # Just plot the first iteration, it will already be crowded if doing > 100 optimization iterations
-            if i > 0:
+        # for i, (train_indices, test_indices) in enumerate(skf.split(list(range(len(self.labels))), np.array([1 for _ in range(len(self.labels))]))):
+        maximum = np.max([
+            [np.max(data) for data in self.data],
+        ])
+        self.data = [data / maximum for data in self.data]
+        cutoff1 = int(0.6 * len(self.labels))
+        cutoff2 = int(0.8 * len(self.labels))
+        train_indices = list(range(len(self.labels)))[:cutoff1]
+        valid_indices = list(range(len(self.labels)))[cutoff1:cutoff2]
+        test_indices = list(range(len(self.labels)))[cutoff2:]
+        # test_indices = list(range(len(x_test)))
+
+        x_train = np.concatenate([self.data[j] for j in range(len(train_indices))], 2).reshape(-1, 256, 256)
+        y_train = np.concatenate([self.labels[j] for j in range(len(train_indices))], 2).reshape(-1, 256, 256)
+        x_valid = np.concatenate([self.data[j] for j in range(len(valid_indices))], 2).reshape(-1, 256, 256)
+        y_valid = np.concatenate([self.labels[j] for j in range(len(valid_indices))], 2).reshape(-1, 256, 256)
+        x_test = np.concatenate([self.data[j] for j in range(len(test_indices))], 2).reshape(-1, 256, 256)
+        y_test = np.concatenate([self.labels[j] for j in range(len(test_indices))], 2).reshape(-1, 256, 256)
+
+        # np.random.shuffle(train_indices)
+        # np.random.shuffle(test_indices)
+
+        # x_train[list(range(len(x_train)))[:cutoff]] = x_train[train_indices]
+        # y_train[list(range(len(x_train)))[:cutoff]] = y_train[train_indices]
+        # x_test = x_test[test_indices]
+        # y_test = y_test[test_indices]
+
+        model = mouse_model.automouseTKV_model(self.input_shape[0], self.input_shape[0], wd=wd)
+        model.compile(optimizer=Adam(lr=lr, decay=wd), loss=self.criterion, metrics=[dice_coef, 'accuracy'])
+
+        model.summary()
+
+        callbacks = []
+        callbacks += [keras.callbacks.ReduceLROnPlateau(
+            monitor='val_loss',
+            factor=0.1,
+            patience=10,
+            verbose=self.verbose,
+            min_lr=1e-12,
+            min_delta=0.0001,
+            cooldown=0,
+            mode='min'
+        )]
+        callbacks += [keras.callbacks.TensorBoard(
+            log_dir=log_filepath,
+            histogram_freq=1,
+            write_graph=True,
+            write_images=False,
+            update_freq="epoch",
+            profile_batch=2,
+            embeddings_freq=0,
+            embeddings_metadata=None,
+        )]
+        if self.save_train_models:
+            callbacks += [tf.keras.callbacks.ModelCheckpoint(
+                filepath,
+                monitor="val_loss",
+                verbose=self.verbose,
+                save_best_only=True,
+                save_weights_only=False,
+                mode="auto",
+                save_freq="epoch",
+                options=None,
+            )]
+        callbacks += [keras.callbacks.EarlyStopping(
+            monitor='val_loss',
+            min_delta=0,
+            patience=30,
+            verbose=self.verbose,
+            mode='auto'
+        )]
+        # y_integers = np.argmax(y_train_conv.view(y_train_conv.shape[0], -1), axis=1)
+        # class_weights = compute_class_weight('balanced', classes=np.unique(y_integers), y=y_integers)
+        # d_class_weights = dict(enumerate(class_weights))
+        history = model.fit(
+            x=x_train,
+            y=y_train,
+            batch_size=2,
+            verbose=self.verbose,
+            epochs=10000,
+            callbacks=callbacks,
+            #validation_data=(x_valid, y_valid)
+        )
+        del model
+        model = tf.keras.models.load_model(filepath, custom_objects={
+            'dice_coef': dice_coef,
+            # 'dice_coef_loss': dice_coef_loss
+        })
+        model.compile(optimizer=Adam(lr=lr, decay=wd), loss=self.criterion, metrics=[dice_coef, 'accuracy'])
+        test_loss, test_dice, test_acc = model.evaluate(x_test, y_test, verbose=self.verbose)
+        y_classes = model.predict(x_test)
+        y_classes_bin = np.round(y_classes, 0)
+
+        os.makedirs(f'views/{self.model_name}/nifti', exist_ok=True)
+        os.makedirs(f'views/{self.model_name}/jpeg', exist_ok=True)
+        for j, (target, img, recon, bin_recon) in enumerate(zip(y_test, x_test, y_classes, y_classes_bin)):
+            if j == 10:
                 break
-            if self.verbose:
-                print(f"CV: {i}")
-            maximum = np.max([
-                np.max(self.data),
-            ])
-            self.data = self.data / maximum
+            target_arr = Image.fromarray(target * 255)
+            img_arr = Image.fromarray(img * 255)
+            recon_arr = Image.fromarray(recon[:, :, -1] * 255)
+            bin_recon_arr = Image.fromarray(bin_recon[:, :, -1] * 255)
+            target_arr.convert('LA').save(f'views/{self.model_name}/jpeg/target_valid_{j}.png')
+            img_arr.convert('LA').save(f'views/{self.model_name}/jpeg/img_valid_{j}.png')
+            recon_arr.convert('LA').save(f'views/{self.model_name}/jpeg/reconstruct_valid_{j}.png')
+            bin_recon_arr.convert('LA').save(f'views/{self.model_name}/jpeg/bin_recon_valid_{j}.png')
 
-            x_train = self.data[train_indices]
-            y_train = self.labels[train_indices]
-            x_test = self.data[test_indices]
-            y_test = self.labels[test_indices]
-            # x_train_conv = np.reshape(x_train, (x_train.shape[0], x_train.shape[2], x_train.shape[3], 1))
-            # x_test_conv = np.reshape(x_test, (x_test.shape[0], x_test.shape[2], x_test.shape[3], 1))
-            # y_train_conv = np.reshape(y_train, (y_train.shape[0], y_train.shape[2], y_train.shape[3], 1))
-            # y_test_conv = np.reshape(y_test, (y_test.shape[0], y_test.shape[2], y_test.shape[3], 1))
+            target = nib.Nifti1Image(target, np.eye(4))
+            img = nib.Nifti1Image(img, np.eye(4))
+            recon = nib.Nifti1Image(recon, np.eye(4))
+            bin_recon = nib.Nifti1Image(bin_recon, np.eye(4))
 
-            model = mouse_model.automouseTKV_model(self.input_shape[0], self.input_shape[0], wd=wd)
-            model.compile(optimizer=Adam(lr=lr, decay=wd), loss="categorical_crossentropy", metrics=[dice_coef, 'accuracy'])
+            target.to_filename(filename=f'views/{self.model_name}/nifti/target_valid_{j}.nii.gz')
+            img.to_filename(filename=f'views/{self.model_name}/nifti/image_valid_{j}.nii.gz')
+            recon.to_filename(filename=f'views/{self.model_name}/nifti/reconstruct_valid_{j}.nii.gz')
+            bin_recon.to_filename(filename=f'views/{self.model_name}/nifti/bin_reconstruct_valid_{j}.nii.gz')
+            del target, img, recon, bin_recon, target_arr, img_arr, recon_arr, bin_recon_arr
 
-            model.summary()
+        self.compute_confusion_matrix(y_test, y_classes)
+        train_acc = history.history['accuracy']
+        valid_acc = history.history['val_accuracy']
+        train_loss = history.history['loss']
+        valid_loss = history.history['val_loss']
 
-            callbacks = []
-            callbacks += [keras.callbacks.ReduceLROnPlateau(
-                monitor='val_loss',
-                factor=0.1,
-                patience=10,
-                verbose=self.verbose,
-                min_lr=1e-12,
-                min_delta=0.0001,
-                cooldown=0,
-                mode='min'
-            )]
-            if i == 0:
-                callbacks += [keras.callbacks.TensorBoard(
-                    log_dir=log_filepath,
-                    histogram_freq=1,
-                    write_graph=True,
-                    write_images=False,
-                    update_freq="epoch",
-                    profile_batch=2,
-                    embeddings_freq=0,
-                    embeddings_metadata=None,
-                )]
-            if self.save_train_models:
-                callbacks += [tf.keras.callbacks.ModelCheckpoint(
-                    filepath,
-                    monitor="val_loss",
-                    verbose=self.verbose,
-                    save_best_only=True,
-                    save_weights_only=False,
-                    mode="auto",
-                    save_freq="epoch",
-                    options=None,
-                )]
-            callbacks += [keras.callbacks.EarlyStopping(
-                monitor='val_loss',
-                min_delta=0,
-                patience=20,
-                verbose=self.verbose,
-                mode='auto'
-            )]
-            # y_integers = np.argmax(y_train_conv.view(y_train_conv.shape[0], -1), axis=1)
-            # class_weights = compute_class_weight('balanced', classes=np.unique(y_integers), y=y_integers)
-            # d_class_weights = dict(enumerate(class_weights))
-            history = model.fit(
-                x=x_train,
-                y=y_train,
-                batch_size=2,
-                verbose=self.verbose,
-                epochs=1000,
-                validation_split=0.2,
-                # class_weight=d_class_weights,
-                callbacks=callbacks
-            )
+        best_epoch = np.argmax(valid_loss)
 
-            model = tf.keras.models.load_model(filepath, custom_objects={
-                'dice_coef': dice_coef,
-                # 'dice_coef_loss': dice_coef_loss
-            })
-            model.compile(optimizer=Adam(lr=lr, decay=wd), loss="categorical_crossentropy", metrics=[dice_coef, 'accuracy'])
-            test_loss, test_dice, test_acc = model.evaluate(x_test, y_test, verbose=self.verbose)
-            y_classes = model.predict(x_test)
-            y_classes_bin = np.round(y_classes, 0)
+        train_losses.append(train_loss[best_epoch])
+        train_accuracies.append(train_acc[best_epoch])
+        valid_losses.append(valid_loss[best_epoch])
+        valid_accuracies.append(valid_acc[best_epoch])
+        test_losses.append(test_loss)
+        test_accuracies.append(test_acc)
+        del test_loss, test_dice, test_acc, history, model
 
-            os.makedirs(f'views/{self.model_name}/nifti', exist_ok=True)
-            os.makedirs(f'views/{self.model_name}/jpeg', exist_ok=True)
-            for j, (target, img, recon, bin_recon) in enumerate(zip(y_test, x_test, y_classes, y_classes_bin)):
-                if j == 10:
-                    break
-                target_arr = Image.fromarray(target * 255)
-                img_arr = Image.fromarray(img * 255)
-                recon_arr = Image.fromarray(recon[:, :, -1] * 255)
-                bin_recon_arr = Image.fromarray(bin_recon[:, :, -1] * 255)
-                target_arr.convert('LA').save(f'views/{self.model_name}/jpeg/target_valid_{j}.png')
-                img_arr.convert('LA').save(f'views/{self.model_name}/jpeg/img_valid_{j}.png')
-                recon_arr.convert('LA').save(f'views/{self.model_name}/jpeg/reconstruct_valid_{j}.png')
-                bin_recon_arr.convert('LA').save(f'views/{self.model_name}/jpeg/bin_recon_valid_{j}.png')
-
-                target = nib.Nifti1Image(target, np.eye(4))
-                img = nib.Nifti1Image(img, np.eye(4))
-                recon = nib.Nifti1Image(recon, np.eye(4))
-                bin_recon = nib.Nifti1Image(bin_recon, np.eye(4))
-
-                target.to_filename(filename=f'views/{self.model_name}/nifti/target_valid_{j}.nii.gz')
-                img.to_filename(filename=f'views/{self.model_name}/nifti/image_valid_{j}.nii.gz')
-                recon.to_filename(filename=f'views/{self.model_name}/nifti/reconstruct_valid_{j}.nii.gz')
-                bin_recon.to_filename(filename=f'views/{self.model_name}/nifti/bin_reconstruct_valid_{j}.nii.gz')
-                del target, img, recon, bin_recon, target_arr, img_arr, recon_arr, bin_recon_arr
-
-            self.compute_confusion_matrix(y_test, y_classes)
-            train_acc = history.history['accuracy']
-            valid_acc = history.history['val_accuracy']
-            train_loss = history.history['loss']
-            valid_loss = history.history['val_loss']
-
-            best_epoch = np.argmax(valid_loss)
-
-            train_losses.append(train_loss[best_epoch])
-            train_accuracies.append(train_acc[best_epoch])
-            valid_losses.append(valid_loss[best_epoch])
-            valid_accuracies.append(valid_acc[best_epoch])
-            test_losses.append(test_loss)
-            test_accuracies.append(test_acc)
-            del test_loss, test_dice, test_acc, history, model
-
-            # TODO Delete this piece of code when memory leak is found. It forces the release of all GPU memory
-            from numba import cuda
-            device = cuda.get_current_device()
-            device.reset()
+        # TODO Delete this piece of code when memory leak is found. It forces the release of all GPU memory
+        from numba import cuda
+        device = cuda.get_current_device()
+        device.reset()
         # TODO Return the best loss to enable Bayesian Optimisation
         self.step += 1
         with tf.summary.create_file_writer(hparams_filepath).as_default():
