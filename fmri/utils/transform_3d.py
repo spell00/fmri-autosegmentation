@@ -10,12 +10,12 @@ import torchvision
 
 class Normalize(object):
     """Normalize a tensor image with mean and standard deviation.
-    Given mean: ``(M1,...,Mn)`` and std: ``(S1,..,Sn)`` for ``n`` channels, this transform
+    Given mean: ``(M1,...,Mn)`` and std: ``(S1,..,Sn)`` for ``n`` channels, this is_transform
     will normalize each channel of the input ``torch.*Tensor`` i.e.
     ``output[channel] = (input[channel] - mean[channel]) / std[channel]``
 
     .. note::
-        This transform acts out of place, i.e., it does not mutate the input tensor.
+        This is_transform acts out of place, i.e., it does not mutate the input tensor.
 
     Args:
         mean (sequence): Sequence of means for each channel.

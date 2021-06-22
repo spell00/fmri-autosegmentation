@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-
+from fmri.models.Base import Base
 import fmri.models.unsupervised.distributed as dist_fn
 
 
@@ -33,6 +33,7 @@ class Quantize(nn.Module):
         self.decay = decay
         self.eps = eps
 
+        torch.manual_seed(42)
         embed = torch.randn(dim, n_embed)
         self.register_buffer("embed", embed)
         self.register_buffer("cluster_size", torch.zeros(n_embed))
@@ -161,7 +162,7 @@ class Decoder(nn.Module):
         return self.blocks(input)
 
 
-class VQVAE(nn.Module):
+class VQVAE(Base):
     def __init__(
         self,
         in_channel=3,
@@ -186,6 +187,7 @@ class VQVAE(nn.Module):
         self.upsample_t = nn.ConvTranspose2d(
             embed_dim, embed_dim, 4, stride=2, padding=1
         )
+        self.dropout = nn.Dropout2d()
         self.dec = Decoder(
             embed_dim + embed_dim,
             in_channel,
@@ -197,6 +199,7 @@ class VQVAE(nn.Module):
         # self.random_init()
 
     def random_init(self, init_func=torch.nn.init.xavier_uniform_):
+        torch.manual_seed(42)
         for m in self.modules():
             if isinstance(m, nn.Linear) or isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
                 init_func(m.weight.data)
@@ -205,6 +208,8 @@ class VQVAE(nn.Module):
 
     def forward(self, input):
         quant_t, quant_b, diff, _, _ = self.encode(input)
+        quant_t = self.dropout(quant_t)
+        quant_b = self.dropout(quant_b)
         dec = self.decode(quant_t, quant_b)
         dec = torch.sigmoid(dec)
         return dec, diff
@@ -244,3 +249,6 @@ class VQVAE(nn.Module):
         dec = self.decode(quant_t, quant_b)
 
         return dec
+
+    def get_model_name(self):
+        return 'vqvae'

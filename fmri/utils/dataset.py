@@ -9,7 +9,7 @@ from fmri.models.unsupervised.VAE_3DCNN import Autoencoder3DCNN
 from fmri.models.unsupervised.SylvesterVAE3DCNN import SylvesterVAE
 import random
 import pydicom
-import datetime
+from skimage.transform import rescale, rotate
 import pandas as pd
 from fmri.utils.transform_3d import Normalize, Rotation3D, ColorJitter3D, Flip90, Flip180, Flip270, XFlip, YFlip, \
     ZFlip, RandomAffine3D
@@ -18,7 +18,8 @@ from torchvision.transforms import RandomHorizontalFlip, RandomVerticalFlip, Ran
     ToTensor
 import torchvision
 random.seed(42)
-
+torch.manual_seed(42)
+np.random.seed(42)
 
 def resize_data(data, new_size=(160, 160, 160)):
     initial_size_x = data.shape[0]
@@ -43,7 +44,49 @@ def resize_data(data, new_size=(160, 160, 160)):
     return new_data
 
 
-def resize_data2d(data, new_size=(160, 160)):
+class Scale(object):
+
+    def __init__(self, scale=0.05):
+        self.scale = scale
+
+    def __call__(self, image, mask):
+        img_size = image.shape[0]
+
+        scale = np.random.uniform(low=1.0 - self.scale, high=1.0 + self.scale)
+
+        image = rescale(
+            image,
+            (scale, scale),
+            multichannel=False,
+            preserve_range=True,
+            mode="constant",
+            anti_aliasing=False,
+        )
+        mask = rescale(
+            mask,
+            (scale, scale),
+            order=0,
+            multichannel=False,
+            preserve_range=True,
+            mode="constant",
+            anti_aliasing=False,
+        )
+
+        if scale < 1.0:
+            diff = (img_size - image.shape[0]) / 2.0
+            padding = ((int(np.floor(diff)), int(np.ceil(diff))),) * 2
+            image = np.pad(image, padding, mode="constant", constant_values=0)
+            mask = np.pad(mask, padding, mode="constant", constant_values=0)
+        else:
+            x_min = (image.shape[0] - img_size) // 2
+            x_max = x_min + img_size
+            image = image[x_min:x_max, x_min:x_max, ...]
+            mask = mask[x_min:x_max, x_min:x_max, ...]
+
+        return image, mask
+
+
+def resize_data2d(data, new_size=(256, 256)):
     initial_size_x = data.shape[0]
     initial_size_y = data.shape[1]
 
@@ -70,7 +113,7 @@ class MRIDataset3D(Dataset):
         self.size = size
         self.samples = os.listdir(path)
         self.targets = os.listdir(targets_path)
-        # random.shuffle(self.samples)
+
         self.transform = transform
         self.normalize = normalize
         self.resize = resize
@@ -148,84 +191,127 @@ class MRIDataset3D(Dataset):
         return x.unsqueeze(0), target, voxel_count, voxel_ratio
 
 
+def get_normalized(x, target):
+    x[torch.isnan(x)] = 0
+    target[torch.isnan(target)] = 0
+    x = x.float()
+    target = target.float()
+    if x.max() > 0:
+        x /= x.max()
+    if target.max() > 0:
+        target /= target.max()
+    return x, target
+
+
+def transform(x, target, scale=0.05):
+    seed = np.random.randint(42)  # make a seed with numpy generator
+    random.seed(seed)  # apply this seed to img transforms
+    (xflip, yflip, rot, rot1, rot2) = [True if x == 1 else False for x in
+                                                                    [random.randint(0, 1) for _ in range(5)]]
+    x = x.reshape([x.shape[0], x.shape[1]])
+
+    x = ToPILImage()(np.array(x, dtype=int))
+    target = ToPILImage()(np.array(target, dtype=int))
+
+    if xflip:
+        # xflip is random, so we need them both flipped together
+        x = RandomHorizontalFlip(p=1)(x)
+        target = RandomHorizontalFlip(p=1)(target)
+    if yflip:
+        x = RandomVerticalFlip(p=1)(x)
+        target = RandomVerticalFlip(p=1)(target)
+
+    if rot:
+        x = torchvision.transforms.functional.rotate(x, 90)
+        target = torchvision.transforms.functional.rotate(target, 90)
+    if rot1:
+        x = torchvision.transforms.functional.rotate(x, 180)
+        target = torchvision.transforms.functional.rotate(target, 180)
+    x = np.array(x)
+    target = np.array(target)
+    # x = np.expand_dims(x, axis=0)
+    # target = np.expand_dims(target, axis=0)
+
+    x, target = Scale(scale=0.05)(x, target)
+    x = torch.Tensor(x)#.squeeze()
+    target = torch.Tensor(target)#.squeeze()
+    return x, target
+
+
 class MRIDataset2D(Dataset):
-    def __init__(self, path, targets_path, transform=True, normalize=None, size=16, resize=True, device='cuda',
-                 test=False):
+    def __init__(self, path, targets_path, scale, transform, normalize=None, size=16, resize=True, device='cuda',
+                 test=False, binarize_target=True, return_all=False):
+        self.binarize_target = binarize_target
         self.path = path
+        self.scale = scale
         self.targets_path = targets_path
         self.device = device
         self.size = size
-        self.samples = os.listdir(path)
-        self.targets = os.listdir(targets_path)
-        # random.shuffle(self.samples)
-        self.transform = transform
-        self.normalize = normalize
+        self.return_all = return_all
+        samples = os.listdir(path)
+        targets = os.listdir(targets_path)
+        samples.sort()
+        targets.sort()
+        for sample, target in zip(samples, targets):
+            try:
+                assert sample.split('avw.nii')[0] in target.split('.nii')[0]
+            except:
+                exit()
+        self.samples = samples
+        self.targets = targets
+
+        self.is_transform = transform
+        self.is_normalize = normalize
         self.resize = resize
         self.test = test
-        (self.xflip, self.yflip, self.rot, self.rot1, self.rot2) = [False for _ in range(5)]
 
     def __len__(self):
         return len(self.samples)
 
-    def __getitem__(self, idx):
-        # The names need to be sorted or at some point an incompatible pair is made
-        self.samples.sort()
-        self.targets.sort()
-        if self.transform:
-            (self.xflip, self.yflip, self.rot, self.rot1, self.rot2) = [True if x == 1 else False for x in
-                                                                        [random.randint(0, 1) for _ in range(5)]]
-        x = self.samples[idx]
-        x = nib.load(self.path + x).dataobj
-
-        # Sum on dim z
-        target = self.targets[idx]
-        target = nib.load(self.targets_path + target).dataobj
-
-        target = torch.Tensor(np.array(target))
-        x = torch.Tensor(np.array(x))
+    def get_random_2d(self, x, target):
+        seed = np.random.randint(42)  # make a seed with numpy generator
+        random.seed(seed)  # apply this seed to img transforms
         ind = random.randint(0, x.shape[2] - 1)
         x = x[:, :, ind]
         target = target[:, :, ind]
 
-        x = resize_data2d(x, (self.size, self.size))
-        target = resize_data2d(target, (self.size, self.size))
+        if x.shape[0] != self.size or x.shape[0] != self.size:
+            x = resize_data2d(x, (self.size, self.size))
+            target = resize_data2d(target, (self.size, self.size))
         x = x.reshape([x.shape[0], x.shape[1]])
-        x = ToPILImage()(np.array(x, dtype=int))
-        target = ToPILImage()(np.array(target, dtype=int))
 
-        if self.xflip:
-            # xflip is random, so we need them both flipped together
-            x = RandomHorizontalFlip(p=1)(x)
-            target = RandomHorizontalFlip(p=1)(target)
-        if self.yflip:
-            x = RandomVerticalFlip(p=1)(x)
-            target = RandomVerticalFlip(p=1)(target)
+        return x, target
 
-        if self.rot:
-            x = torchvision.transforms.functional.rotate(x, 90)
-            target = torchvision.transforms.functional.rotate(target, 90)
-        if self.rot1:
-            x = torchvision.transforms.functional.rotate(x, 180)
-            target = torchvision.transforms.functional.rotate(target, 180)
-        # if self.rot2:
-        #     x = torchvision.transforms.functional.rotate(x, 270)
-        #     target = torchvision.transforms.functional.rotate(target, 270)
+    def __getitem__(self, idx):
+        self.samples.sort()
+        self.targets.sort()
 
-        x = torch.Tensor(np.array(x))
-        target = torch.Tensor(np.array(target))
+        x = self.samples[idx]
+        x = nib.load(f"{self.path}/{x}").dataobj
 
-        if self.normalize:
-            x[torch.isnan(x)] = 0
-            target[torch.isnan(target)] = 0
-            x = x.float()
-            target = target.float()
-            if x.max() > 0:
-                x /= x.max()
-            if target.max() > 0:
-                target /= target.max()
-        # TODO replace by max of all targets?
+        # Sum on dim z
+        target = self.targets[idx]
+        target = nib.load(f"{self.targets_path}/{target}").dataobj
 
-        target[target > 0] = 1
+        if not self.return_all:
+            x, target = self.get_random_2d(x, target)
+            if self.is_transform:
+                x, target = transform(x, target, scale=self.scale)
+            else:
+                x, target = torch.Tensor(x), torch.Tensor(target)
+            if self.is_normalize:
+                x, target = get_normalized(x, target)
+            if self.binarize_target:
+                target[target > 0] = 1
+
+        else:
+            x = torch.Tensor(np.array(x))
+            target = torch.Tensor(np.array(target))
+
+            for i, (s, ts) in enumerate(zip(x, target)):
+                x[i], target[i] = get_normalized(s, ts)
+                if self.binarize_target:
+                    target[i][target[i] > 0] = 1
 
         return x, target
 
@@ -346,27 +432,21 @@ def save_checkpoint(
         n_classes=None
 ):
     model_for_saving = None
-    if name == 'classifier':
-        model_for_saving = model_name(params)
-    model_type = name.split("_")[0]
-    if model_type == 'vae':
-        if params['flow_type'] != 'o-sylvester':
-            model_for_saving = model_name(params)
-        else:
-            model_for_saving = SylvesterVAE(params)
-    elif model_type == "classif":
-        model_for_saving = ConvResnet3D(params, n_classes)
-    elif model_type == 'vqvae':
-        model_for_saving = model_name(
+    if model_name == 'vqvae':
+        from fmri.models.unsupervised.VQVAE2_2D import VQVAE
+        model_for_saving = VQVAE(
             in_channel=1,
-            channel=512,
+            channel=params['n_channel'],
             n_res_block=params['n_res'],
-            n_res_channel=64,
+            n_res_channel=params['n_res_channel'],
             embed_dim=params['z_dim'],
-            n_embed=1024,
+            n_embed=params['n_embed'],
         )
+    elif model_name == 'unet':
+        from fmri.models.unsupervised.unet import UNet
+        model_for_saving = UNet()
     else:
-        exit(f'{model_type} cannot be saved for now. Sorry.')
+        exit(f'{model_name} cannot be saved for now. Sorry.')
     model_for_saving.load_state_dict(model.state_dict())
     os.makedirs(checkpoint_path + '/' + name, exist_ok=True)
     torch.save({

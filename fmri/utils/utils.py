@@ -154,6 +154,7 @@ def validation_split(dataset, val_share=0.1):
     val_offset = int(len(dataset) * (1 - val_share))
     return PartialDataset(dataset, 0, val_offset), PartialDataset(dataset, val_offset, len(dataset) - val_offset)
 
+
 class validation_spliter:
     def __init__(self, dataset, cv):
         self.cv = cv
@@ -172,7 +173,7 @@ class validation_spliter:
 
         # Move the samples currently used for the validation set at the end for the next split
         tmp = self.dataset.samples[:self.val_offset]
-        self.dataset.samples = self.dataset.samples[self.val_offset:] + tmp
+        self.dataset.samples = np.concatenate([self.dataset.samples[self.val_offset:], tmp])
 
         return partial_dataset
 

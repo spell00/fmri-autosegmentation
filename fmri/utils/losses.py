@@ -102,3 +102,6 @@ class MCC(Metric):
         Computes Matthews Correlation Coefficient over state.
         """
         return self.matthews_corr_coef / self.total
+
+#  https://github.com/bermanmaxim/LovaszSoftmax/blob/master/pytorch/lovasz_losses.py
+
