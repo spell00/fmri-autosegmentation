@@ -3,7 +3,6 @@ from torch import nn
 from torch.nn import functional as F
 from fmri.models.Base import Base
 import fmri.models.unsupervised.distributed as dist_fn
-from fmri.models.unsupervised.fastfcn.nn import JPU
 
 # Copyright 2018 The Sonnet Authors. All Rights Reserved.
 #
