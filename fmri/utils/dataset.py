@@ -7,15 +7,16 @@ import nibabel as nib
 from fmri.models.supervised.resnetcnn3d import ConvResnet3D
 from fmri.models.unsupervised.VAE_3DCNN import Autoencoder3DCNN
 from fmri.models.unsupervised.SylvesterVAE3DCNN import SylvesterVAE
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 import random
 import pydicom
 from skimage.transform import rescale, rotate
 import pandas as pd
-from fmri.utils.transform_3d import Normalize, Rotation3D, ColorJitter3D, Flip90, Flip180, Flip270, XFlip, YFlip, \
+from fmri.utils.transform_3d import Rotation3D, ColorJitter3D, Flip90, Flip180, Flip270, XFlip, YFlip, \
     ZFlip, RandomAffine3D
 
 from torchvision.transforms import RandomHorizontalFlip, RandomVerticalFlip, RandomRotation, Resize, ToPILImage, \
-    ToTensor
+    ToTensor, Normalize
 import torchvision
 random.seed(42)
 torch.manual_seed(42)
@@ -193,6 +194,9 @@ class MRIDataset3D(Dataset):
 
 def get_normalized(x, target):
     x[torch.isnan(x)] = 0
+
+    # TODO Get actual mean and std
+    x = Normalize(mean=[0.07777917612344026], std=[0.09724704712629319])(x.unsqueeze(0).unsqueeze(0)).squeeze()
     target[torch.isnan(target)] = 0
     x = x.float()
     target = target.float()
@@ -200,6 +204,7 @@ def get_normalized(x, target):
         x /= x.max()
     if target.max() > 0:
         target /= target.max()
+    # x = torch.FloatTensor(scaler.fit_transform(x.cpu().detach().numpy()))
     return x, target
 
 
@@ -232,7 +237,7 @@ def transform(x, target, scale=0.05):
     # x = np.expand_dims(x, axis=0)
     # target = np.expand_dims(target, axis=0)
 
-    x, target = Scale(scale=0.05)(x, target)
+    x, target = Scale(scale=scale)(x, target)
     x = torch.Tensor(x)#.squeeze()
     target = torch.Tensor(target)#.squeeze()
     return x, target
@@ -264,6 +269,7 @@ class MRIDataset2D(Dataset):
         self.is_normalize = normalize
         self.resize = resize
         self.test = test
+        self.scaler = MinMaxScaler()
 
     def __len__(self):
         return len(self.samples)
@@ -286,9 +292,10 @@ class MRIDataset2D(Dataset):
         self.samples.sort()
         self.targets.sort()
 
-        x = self.samples[idx]
-        x = nib.load(f"{self.path}/{x}").dataobj
-
+        name = self.samples[idx]
+        x = nib.load(f"{self.path}/{name}")
+        affine = x.affine
+        x = x.dataobj
         # Sum on dim z
         target = self.targets[idx]
         target = nib.load(f"{self.targets_path}/{target}").dataobj
@@ -307,13 +314,13 @@ class MRIDataset2D(Dataset):
         else:
             x = torch.Tensor(np.array(x))
             target = torch.Tensor(np.array(target))
-
-            for i, (s, ts) in enumerate(zip(x, target)):
-                x[i], target[i] = get_normalized(s, ts)
+            if self.is_normalize:
+                x, target = get_normalized(x, target)
+            for i in range(len(x)):
                 if self.binarize_target:
                     target[i][target[i] > 0] = 1
 
-        return x, target
+        return x, target, affine, name
 
 
 def load_scan(path):
@@ -428,7 +435,7 @@ def save_checkpoint(
         model_name,
         name,
         timestamp,
-        best_loss=-1,
+        best_dict,
         n_classes=None
 ):
     model_for_saving = None
@@ -453,7 +460,7 @@ def save_checkpoint(
         'model': model_for_saving,
         'optimizer': optimizer,
         'losses': losses,
-        'best_loss': best_loss,
+        'best_dict': best_dict,
         'epoch': epoch,
         'learning_rate': params['lr']
     }, f"{checkpoint_path}/{name}/{timestamp}.model")

@@ -3,7 +3,7 @@ from torch import nn
 from torch.nn import functional as F
 from fmri.models.Base import Base
 import fmri.models.unsupervised.distributed as dist_fn
-
+from fmri.models.unsupervised.fastfcn.nn import JPU
 
 # Copyright 2018 The Sonnet Authors. All Rights Reserved.
 #
@@ -161,7 +161,7 @@ class Decoder(nn.Module):
     def forward(self, input):
         return self.blocks(input)
 
-
+#  Make a VQVAE with merges like automouse_model
 class VQVAE(Base):
     def __init__(
         self,
@@ -171,7 +171,8 @@ class VQVAE(Base):
         n_res_channel=32,
         embed_dim=64,
         n_embed=512,
-        decay=0.99,
+        dropout=0,
+        decay=0.99
     ):
         super().__init__()
 
@@ -187,7 +188,7 @@ class VQVAE(Base):
         self.upsample_t = nn.ConvTranspose2d(
             embed_dim, embed_dim, 4, stride=2, padding=1
         )
-        self.dropout = nn.Dropout2d()
+        self.dropout = nn.Dropout2d(p=dropout)
         self.dec = Decoder(
             embed_dim + embed_dim,
             in_channel,
