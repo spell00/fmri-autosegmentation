@@ -2,7 +2,7 @@ torch~=1.8.1
 numpy~=1.19.5
 matplotlib~=3.4.2
 tqdm~=4.61.0
-torchvision~=0.9.1
+torchvision
 nibabel~=3.2.1
 tensorboardX~=2.2
 pandas~=1.2.4
@@ -14,3 +14,4 @@ Pillow~=8.2.0
 scipy~=1.6.3
 pydicom~=2.1.2
 setuptools~=57.0.0
+scikit-image
