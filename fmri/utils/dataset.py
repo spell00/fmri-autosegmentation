@@ -10,6 +10,7 @@ from fmri.models.unsupervised.SylvesterVAE3DCNN import SylvesterVAE
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 import random
 import pydicom
+import torchvision.transforms as T
 from skimage.transform import rescale, rotate
 import pandas as pd
 from fmri.utils.transform_3d import Rotation3D, ColorJitter3D, Flip90, Flip180, Flip270, XFlip, YFlip, \
@@ -21,6 +22,7 @@ import torchvision
 random.seed(42)
 torch.manual_seed(42)
 np.random.seed(42)
+
 
 def resize_data(data, new_size=(160, 160, 160)):
     initial_size_x = data.shape[0]
@@ -108,6 +110,7 @@ def resize_data2d(data, new_size=(256, 256)):
 
 class MRIDataset3D(Dataset):
     def __init__(self, path, targets_path, transform=True, normalize=None, size=16, resize=True, device='cuda'):
+
         self.path = path
         self.targets_path = targets_path
         self.device = device
@@ -119,7 +122,7 @@ class MRIDataset3D(Dataset):
         self.normalize = normalize
         self.resize = resize
         (self.xflip, self.yflip, self.zflip, self.flip90, self.flip180, self.flip270, self.rot0, self.rot1,
-         self.rot2) = [0 for _ in range(9)]
+         self.rot2, self.gaussian_blur, self.randomAffine, self.randomResizedCrop) = [0 for _ in range(12)]
 
     def __len__(self):
         return len(self.samples)
@@ -129,7 +132,7 @@ class MRIDataset3D(Dataset):
         self.targets.sort()
         if self.transform:
             (self.xflip, self.yflip, self.zflip, self.flip90, self.flip180, self.flip270, self.rot0, self.rot1,
-             self.rot2) = [random.randint(0, 1) for _ in range(9)]
+             self.rot2, self.gaussian_blur, self.randomAffine, self.randomResizedCrop) = [random.randint(0, 1) for _ in range(12)]
         x = self.samples[idx]
         x = nib.load(self.path + x).dataobj
         x = np.array(x)
@@ -150,6 +153,17 @@ class MRIDataset3D(Dataset):
         if self.xflip:
             x = XFlip()(x)
             target = XFlip()(target)
+        if self.gaussian_blur:
+            blurrer = T.GaussianBlur(kernel_size=(5, 9), sigma=(0.1, 5))
+            x = blurrer(x)
+        if self.randomAffine:
+            random_affine = T.RandomAffine(distortion_scale=0.6, p=1.0)
+            x = random_affine(x)
+            target = random_affine(target)
+        if self.randomResizedCrop:
+            resize_cropper = T.RandomResizedCrop(size=(224, 224))
+            x = resize_cropper(x)
+            target = resize_cropper(target)
         if self.yflip:
             x = YFlip()(x)
             target = YFlip()(target)
@@ -211,13 +225,21 @@ def get_normalized(x, target):
 def transform(x, target, scale=0.05):
     seed = np.random.randint(42)  # make a seed with numpy generator
     random.seed(seed)  # apply this seed to img transforms
-    (xflip, yflip, rot, rot1, rot2) = [True if x == 1 else False for x in
-                                                                    [random.randint(0, 1) for _ in range(5)]]
+    (xflip, yflip, rot, rot1, rot2, gaussian_blur, randomResizedCrop) = [True if x == 1 else False for x in
+                                                                    [random.randint(0, 1) for _ in range(7)]]
     x = x.reshape([x.shape[0], x.shape[1]])
 
     x = ToPILImage()(np.array(x, dtype=int))
     target = ToPILImage()(np.array(target, dtype=int))
 
+    if gaussian_blur:
+        blurrer = T.GaussianBlur(kernel_size=(5, 9), sigma=(0.1, 5))
+        x = blurrer(x)
+    if randomResizedCrop:
+        cropper = T.functional.five_crop
+        n = random.randint(0, 4)
+        x = T.functional.resize(cropper(x, size=(224, 224))[n], 256)
+        target = T.functional.resize(cropper(target, size=(224, 224))[n], 256)
     if xflip:
         # xflip is random, so we need them both flipped together
         x = RandomHorizontalFlip(p=1)(x)
@@ -237,7 +259,7 @@ def transform(x, target, scale=0.05):
     # x = np.expand_dims(x, axis=0)
     # target = np.expand_dims(target, axis=0)
 
-    x, target = Scale(scale=scale)(x, target)
+    # x, target = Scale(scale=scale)(x, target)
     x = torch.Tensor(x)#.squeeze()
     target = torch.Tensor(target)#.squeeze()
     return x, target
@@ -413,16 +435,15 @@ def load_checkpoint(params,
     else:
         print('Checkpoint exists.')
         last_name = names[-1]
-    checkpoint_dict = torch.load(f"{checkpoint_path}/{name}/{last_name}", map_location=device)
+    checkpoint_dict = torch.load(f"{checkpoint_path}/{name}/{last_name}", map_location='cpu')
     epoch = checkpoint_dict['epoch']
-    best_loss = checkpoint_dict['best_loss']
-    # optimizer.load_state_dict(checkpoint_dict['optimizer'].state_dict().to(device))
-    model_for_loading = checkpoint_dict['model']
-    model.load_state_dict(model_for_loading.state_dict())
-    model = model.to(device)
+    best_dict = checkpoint_dict['best_dict']
+    optimizer.load_state_dict(checkpoint_dict['optimizer'])
+    model.load_state_dict(checkpoint_dict['model'])
+    # model = model.to(device)
     losses = checkpoint_dict['losses']
     print("Loaded checkpoint '{}' (epoch {})".format(checkpoint_path, epoch))
-    return model, optimizer, epoch, losses, best_loss
+    return model, optimizer, epoch, losses, best_dict
 
 
 def save_checkpoint(
@@ -438,27 +459,10 @@ def save_checkpoint(
         best_dict,
         n_classes=None
 ):
-    model_for_saving = None
-    if model_name == 'vqvae':
-        from fmri.models.unsupervised.VQVAE2_2D import VQVAE
-        model_for_saving = VQVAE(
-            in_channel=1,
-            channel=params['n_channel'],
-            n_res_block=params['n_res'],
-            n_res_channel=params['n_res_channel'],
-            embed_dim=params['z_dim'],
-            n_embed=params['n_embed'],
-        )
-    elif model_name == 'unet':
-        from fmri.models.unsupervised.unet import UNet
-        model_for_saving = UNet()
-    else:
-        exit(f'{model_name} cannot be saved for now. Sorry.')
-    model_for_saving.load_state_dict(model.state_dict())
     os.makedirs(checkpoint_path + '/' + name, exist_ok=True)
     torch.save({
-        'model': model_for_saving,
-        'optimizer': optimizer,
+        'model': model.state_dict(),
+        'optimizer': optimizer.state_dict(),
         'losses': losses,
         'best_dict': best_dict,
         'epoch': epoch,

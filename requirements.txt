@@ -2,11 +2,12 @@ torch~=1.8.1
 numpy~=1.19.5
 matplotlib~=3.4.2
 tqdm~=4.61.0
-torchvision
+torchvision~=0.9.1
 nibabel~=3.2.1
 tensorboardX~=2.2
 pandas~=1.2.4
-tensorflow~=2.5.0
+tensorflow=2.4.0
+tensorflow-gpu=2.4.0
 tensorboard~=2.5.0
 sklearn~=0.0
 scikit-learn~=0.24.2

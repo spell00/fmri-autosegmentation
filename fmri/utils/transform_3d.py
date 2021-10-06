@@ -47,7 +47,7 @@ class Flip90(object):
         self.inplace = inplace
         self.rand = rand
 
-    def __call__(self, tensor, p=0.5):
+    def __call__(self, tensor, fine_tune=0.5):
         if randint(0, 1) == 1 or not self.rand:
             return tensor.transpose(1, 2)
         else:

@@ -160,6 +160,7 @@ class Decoder(nn.Module):
     def forward(self, input):
         return self.blocks(input)
 
+
 #  Make a VQVAE with merges like automouse_model
 class VQVAE(Base):
     def __init__(

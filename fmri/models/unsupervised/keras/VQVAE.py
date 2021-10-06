@@ -5,6 +5,7 @@ from keras import backend as K
 from keras import losses
 import tensorflow as tf
 
+
 class VQVAELayer(Layer):
     def __init__(self, embedding_dim, num_embeddings, commitment_cost,
                  initializer='uniform', epsilon=1e-10, **kwargs):

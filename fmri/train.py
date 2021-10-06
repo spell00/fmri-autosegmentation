@@ -115,7 +115,7 @@ def compute_confusion_matrix(y_test, y_classes):
         sensitivity = 0
     if tp != 0 and fp != 0:
         precision = tp / (tp + fp)
-        vdr = (fp - fn) / (tp + fn)
+        vdr = (fp - fn) / (tp + fn)  # Volume Difference ratio
     else:
         precision = 0
         vdr = 0
@@ -171,6 +171,7 @@ class Train:
                  targets_path_valid,
                  loss,
                  checkpoint_path,
+                 is_kl,
                  fp16_run=False,
                  epochs_per_checkpoint=1,
                  epochs_per_print=1,
@@ -181,6 +182,7 @@ class Train:
                  save=True,
                  ):
         super().__init__()
+        self.is_kl = is_kl
         self.model = model
         self.model_name = model_name
         self.fp16_run = fp16_run
@@ -263,7 +265,7 @@ class Train:
                 dropout=self.params['dropout']
             )
 
-        elif self.model_name in ["unet", "voxnet"]:
+        elif self.model_name in ["unet", "vqunet", "voxnet", 'automouse']:
             model = self.model()
 
         wd_str = str(self.params["wd"])
@@ -285,12 +287,14 @@ class Train:
             f'ne{self.params["n_embed"]}',
             f'nrc{self.params["n_res_channel"]}',
             f'nc{self.params["n_channel"]}',
+            f"kl{self.is_kl}",
             f'wd{wd_str}',
             f'l1{l1_str}',
-            f'd{drop_str}',
+            f'd{0}',
             f"s{scale_str}"
         ])
         # model.random_init()
+        model = model.to(device)
         optimizer = get_optimizer(model, self.params)
 
         # Load checkpoint if one exists
@@ -308,19 +312,18 @@ class Train:
             try:
                 model, optimizer, \
                 epoch, losses, \
-                best_dict['loss'] = load_checkpoint(checkpoint_path=self.checkpoint_path,
+                best_dict = load_checkpoint(checkpoint_path=self.checkpoint_path,
                                                     model=model,
                                                     params=self.params,
                                                     epoch=epoch,
                                                     predict=False,
                                                     optimizer=optimizer,
-                                                    name=self.model_name,
-                                                    model_name=VQVAE,
+                                                    name=self.model_path,
+                                                    model_name=self.model_name,
                                                     timestamp=timestamp
                                                     )
             except IOError:
                 print('No checkpoint found. Creating a new model.')
-        model = model.to(device)
 
         train_set = MRIDataset2D(self.images_path_train, self.targets_path_train, scale=self.params['scale'],
                                  size=self.params['size'], normalize=True, transform=True)
@@ -484,7 +487,7 @@ class Train:
                     break
                 model.train()
                 # pbar = tqdm(total=len(train_loader))
-                for _ in range(20):
+                for ii in range(20):
                     for i, batch in enumerate(train_loader):
                         # pbar.update(1)
                         model.zero_grad()
@@ -492,22 +495,25 @@ class Train:
                         images = images.to(device)
                         targets = targets.to(device)
                         reconstruct, kl = model(images.unsqueeze(1))
-                        bin_reconstruct = (reconstruct > 0.5).float()
+                        bin_reconstruct = (reconstruct > 0.9).float()
 
                         jaccard = jaccard_loss(targets, bin_reconstruct)
                         dice = dice_loss(targets, bin_reconstruct)
 
                         volume_target = targets.sum()
-                        volume_rec = reconstruct.sum()
+                        volume_rec = reconstruct.squeeze().sum()
                         volume_rec_bin = bin_reconstruct.sum()
-                        vol_target_ratio = volume_target / volume_rec
-                        vol_target_bin_ratio = volume_target / volume_rec_bin
+                        vol_target_ratio = torch.mean(volume_target / volume_rec)
+                        vol_target_bin_ratio = torch.mean(volume_target / volume_rec_bin)
 
                         loss_recon = self.criterion(
                             reconstruct.squeeze(1),  # .view(len(batch), -1),
                             targets  # .view(len(batch), -1)
                         ).sum() / self.params['bs']
-                        kl_div = torch.mean(kl)
+                        if self.is_kl:
+                            kl_div = torch.mean(kl)
+                        else:
+                            kl_div = torch.Tensor([0]).to(device)
                         loss = loss_recon + kl_div
                         if self.params['l1'] > 0:
                             l1 = self.get_l1(model, device)
@@ -527,8 +533,8 @@ class Train:
                         traces['losses']['train'] += [loss.item()]
                         traces['kl_divs']['train'] += [kl_div.item()]
                         traces['recon']['train'] += [loss_recon.item()]
-                        traces['dice']['train'] += [dice.item()]
-                        traces['jaccard']['train'] += [jaccard.item()]
+                        traces['dice']['train'] += [1 - dice.item()]
+                        traces['jaccard']['train'] += [1 - jaccard.item()]
                         traces['vdr']['train'] += [vdr]
                         traces["vol_target_ratio"]['train'] += [vol_target_ratio.item()]
                         traces["vol_target_bin_ratio"]['train'] += [vol_target_bin_ratio.item()]
@@ -605,6 +611,7 @@ class Train:
                         new_target3d = torch.zeros_like(targets3d[0])
                         reconstruct3d = torch.zeros_like(targets3d[0])
                         bin_reconstruct3d = torch.zeros_like(targets3d[0])
+                        kl_divs = 0
                         for j in range(images3d.shape[-1]):
                             images = images3d[:, :, :, j].to(device)
                             targets = targets3d[:, :, :, j].to(device)
@@ -612,53 +619,17 @@ class Train:
                                 reconstruct, kl = model(images.unsqueeze(1))
                             except:
                                 continue
-                            bin_reconstruct = (reconstruct > 0.5).float()
+                            bin_reconstruct = (reconstruct > 0.9).float()
 
-                            volume_target = targets.sum()
-                            volume_rec = reconstruct.sum()
-                            volume_rec_bin = bin_reconstruct.sum()
-                            vol_target_ratio = volume_target / volume_rec
-                            vol_target_bin_ratio = volume_target / volume_rec_bin
-                            if torch.isinf(vol_target_ratio) or torch.isnan(vol_target_ratio):
-                                vol_target_ratio = torch.Tensor([1])
-                            if torch.isinf(vol_target_bin_ratio) or torch.isnan(vol_target_bin_ratio):
-                                vol_target_bin_ratio = torch.Tensor([1])
-                            loss_recon = self.criterion(
-                                reconstruct.view(1, -1),
-                                targets.view(1, -1)
-                            ).sum()
-                            kl_div = torch.mean(kl)
-                            dice = dice_loss(y_true=targets, y_preds=bin_reconstruct)
-                            loss = loss_recon + kl_div
-                            jaccard = jaccard_loss(
-                                y_true=targets.reshape(targets.shape[0], -1),
-                                y_preds=bin_reconstruct.reshape(targets.shape[0], -1)
-                            )
-
-                            sensitivity, specificity, precision, vdr = compute_confusion_matrix(y_test=targets,
-                                                                                           y_classes=bin_reconstruct)
-
-                            total = len(targets.view(-1))
-                            acc = np.mean([torch.sum(x == y).item() for x, y in zip(bin_reconstruct, targets)]) / total
-
-                            traces['sensitivity']['valid'] += [sensitivity]
-                            traces['specificity']['valid'] += [specificity]
-                            traces['precision']['valid'] += [precision]
-                            traces['acc']['valid'] += [acc]
-                            traces['losses']['valid'] += [loss.item()]
-                            traces['kl_divs']['valid'] += [kl_div.item()]
-                            traces['jaccard']['valid'] += [jaccard.item()]
-                            traces['dice']['valid'] += [dice.item()]
-                            traces['vdr']['valid'] += [vdr]
-                            traces["vol_target_ratio"]['valid'] += [vol_target_ratio.item()]
-                            traces["vol_target_bin_ratio"]['valid'] += [vol_target_bin_ratio.item()]
-                            traces['recon']['valid'] += [loss_recon.item()]
-                            traces['abs_error']['valid'] += [
-                                float(torch.mean(torch.abs_(reconstruct - images.to(device))).item())]
+                            if self.is_kl:
+                                kl_div = torch.mean(kl)
+                            else:
+                                kl_div = torch.Tensor([0]).to(device)
                             new_image3d[:, :, j] = images.squeeze()
                             new_target3d[:, :, j] = targets.squeeze()
                             reconstruct3d[:, :, j] = reconstruct.squeeze()
                             bin_reconstruct3d[:, :, j] = bin_reconstruct.squeeze()
+                            kl_divs += kl_div.item()
                         try:
                             new_im3d = nib.Nifti1Image(new_image3d.detach().cpu().numpy(), affine[0])
                             im3d = nib.Nifti1Image(images3d.detach().cpu().numpy(), affine[0])
@@ -672,6 +643,47 @@ class Train:
                             bin_recon3d.to_filename(filename=f'views/{self.model_path}/valid/bin_reconstruct_{name[0]}')
                         except:
                             pass
+                        volume_target = new_target3d.sum()
+                        volume_rec = reconstruct3d.sum()
+                        volume_rec_bin = bin_reconstruct3d.squeeze().sum()
+                        vol_target_ratio = torch.mean(volume_target / volume_rec)
+                        vol_target_bin_ratio = torch.mean(volume_target / volume_rec_bin)
+                        dice = dice_loss(y_true=new_target3d, y_preds=bin_reconstruct3d)
+                        jaccard = jaccard_loss(
+                            y_true=new_target3d.reshape(new_target3d.shape[0], -1),
+                            y_preds=bin_reconstruct3d.reshape(new_target3d.shape[0], -1)
+                        )
+
+                        sensitivity, specificity, precision, vdr = compute_confusion_matrix(y_test=new_target3d,
+                                                                                            y_classes=bin_reconstruct3d)
+
+                        if torch.isinf(vol_target_ratio) or torch.isnan(vol_target_ratio):
+                            vol_target_ratio = torch.Tensor([1])
+                        if torch.isinf(vol_target_bin_ratio) or torch.isnan(vol_target_bin_ratio):
+                            vol_target_bin_ratio = torch.Tensor([1])
+                        loss_recon = self.criterion(
+                            reconstruct3d.view(1, -1),
+                            new_target3d.view(1, -1)
+                        ).sum().item()
+                        total = len(new_target3d.view(-1))
+                        acc = np.mean([torch.sum(x == y).item() for x, y in zip(bin_reconstruct3d.view(-1), new_target3d.view(-1))])
+
+                        loss = loss_recon + kl_divs
+                        traces["vol_target_ratio"]['valid'] += [vol_target_ratio.item()]
+                        traces["vol_target_bin_ratio"]['valid'] += [vol_target_bin_ratio.item()]
+                        traces['sensitivity']['valid'] += [sensitivity]
+                        traces['specificity']['valid'] += [specificity]
+                        traces['precision']['valid'] += [precision]
+                        traces['acc']['valid'] += [acc]
+                        traces['losses']['valid'] += [loss]
+                        traces['kl_divs']['valid'] += [kl_divs]
+                        traces['jaccard']['valid'] += [1 - jaccard.item()]
+                        traces['dice']['valid'] += [1 - dice.item()]
+                        traces['vdr']['valid'] += [vdr]
+                        traces['recon']['valid'] += [loss_recon]
+                        traces['abs_error']['valid'] += [
+                            float(torch.mean(torch.abs_(reconstruct3d - new_image3d)).item())]
+
                 results["specificity"]["valid"] += [np.mean(traces['specificity']['valid'])]
                 results["sensitivity"]["valid"] += [np.mean(traces['sensitivity']['valid'])]
                 results["precision"]["valid"] += [np.mean(traces['precision']['valid'])]
@@ -747,7 +759,7 @@ class Train:
                             epoch=epoch,
                             checkpoint_path=self.checkpoint_path,
                             losses=losses_to_save,
-                            best_dict=best_dict['loss'],
+                            best_dict=best_dict,
                             name=self.model_path,
                             params=self.params,
                             model_name=self.model_name,
@@ -766,14 +778,14 @@ class Train:
 
         tb_logging.logging(results)
 
-        return best_dict['jaccard']
+        return 1 - best_dict['jaccard']
 
     def get_scheduler(self, optimizer, n_samples=None):
         if self.params['scheduler'] == 'ReduceLROnPlateau':
             lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer,
                                                                       factor=0.1,
                                                                       cooldown=0,
-                                                                      patience=5,
+                                                                      patience=10,
                                                                       verbose=True,
                                                                       min_lr=1e-8)
         elif self.params['scheduler'] == 'CycleScheduler':
@@ -813,12 +825,17 @@ if __name__ == "__main__":
     parser.add_argument("--loss", type=str, default="bce", help="Path to labels csv file")
     parser.add_argument("--verbose", type=str, default=1)
     parser.add_argument("--model", type=str, default='vqvae')
+    parser.add_argument("--kl", type=int, default=1)
     args = parser.parse_args()
 
     if args.model == 'vqvae':
         from fmri.models.unsupervised.VQVAE2_2D import VQVAE as model
+    elif args.model == "automouse":
+        from fmri.models.unsupervised.keras.automouse_model import AutomouseTKVModel as model
     elif args.model == "unet":
         from fmri.models.unsupervised.unet import UNet as model
+    elif args.model == "vqunet":
+        from fmri.models.unsupervised.vq_unet import VQUNet as model
     elif args.model == "fcn":
         exit('Not implemented')
     elif args.model == "voxnet":
@@ -830,7 +847,7 @@ if __name__ == "__main__":
     params = {
         "cv": 5,
         "bn": True,
-        "bs": 3,
+        "bs": 5,
         "n_epochs": 1000,
         "size": 256,
         'epochs_per_checkpoint': 1,
@@ -854,6 +871,7 @@ if __name__ == "__main__":
     training = Train(
         params,
         model,
+        is_kl=args.kl,
         images_path_train=args.images_path_train,
         images_path_valid=args.images_path_valid,
         targets_path_train=args.labels_path_train,
@@ -861,7 +879,7 @@ if __name__ == "__main__":
         loss=args.loss,
         checkpoint_path=args.checkpoint_path,
         save=True,
-        load=False,
+        load=True,
         early_stop=25,
         save_checkpoints=True,
         model_name=args.model
@@ -872,11 +890,11 @@ if __name__ == "__main__":
         parameters=[
             {"name": "scale", "type": "range", "bounds": [0., 0.1]},
             {"name": "z_dim", "type": "range", "bounds": [2, 64]},
-            {"name": "n_res", "type": "range", "bounds": [10, 20]},
+            {"name": "n_res", "type": "range", "bounds": [1, 10]},
             {"name": "dropout", "type": "range", "bounds": [0., 0.5]},
-            {"name": "n_channel", "type": "range", "bounds": [256, 512]},
-            {"name": "n_embed", "type": "range", "bounds": [512, 1024]},
-            {"name": "n_res_channel", "type": "range", "bounds": [32, 64]},
+            {"name": "n_channel", "type": "range", "bounds": [32, 128]},
+            {"name": "n_embed", "type": "range", "bounds": [32, 256]},
+            {"name": "n_res_channel", "type": "range", "bounds": [16, 32]},
             {"name": "l1", "type": "range", "bounds": [1e-12, 1e-3], "log_scale": True},
             {"name": "weight_decay", "type": "range", "bounds": [1e-12, 1e-3], "log_scale": True},
             {"name": "learning_rate", "type": "range", "bounds": [1e-4, 1e-3], "log_scale": True},
